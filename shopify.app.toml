@@ -2,7 +2,7 @@
 
 client_id = "2a8377cb82f0ba4982f17cdae785711d"
 name = "employee-purchase-tool"
-application_url = "https://example.com"
+application_url = "https://employee-purchase-tool.onrender.com"
 embedded = true
 
 [build]
@@ -20,11 +20,11 @@ api_version = "2026-04"
   uri = "/webhooks/app/uninstalled"
 
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+# Keep these as-is for now so your current pricing logic is not affected
 scopes = "read_draft_orders,read_products,write_draft_orders,write_metaobject_definitions,write_metaobjects,write_products"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://employee-purchase-tool.onrender.com/auth/callback" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"
