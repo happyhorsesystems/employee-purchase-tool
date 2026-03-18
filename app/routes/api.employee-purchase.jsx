@@ -95,7 +95,7 @@ export const loader = async ({ request }) => {
           draftOrder(id: $id) {
             id
             name
-            note
+            note2
             tags
             lineItems(first: 50) {
               nodes {
@@ -150,7 +150,7 @@ export const loader = async ({ request }) => {
     }
 
     const alreadyTagged = hasEmployeePurchaseTag(draftOrder.tags);
-    const alreadyNoted = hasEmployeePurchaseNote(draftOrder.note, settings.notePrefix);
+    const alreadyNoted = hasEmployeePurchaseNote(draftOrder.note2, settings.notePrefix);
 
     if (alreadyTagged || alreadyNoted) {
       const message =
@@ -171,7 +171,7 @@ export const loader = async ({ request }) => {
           ok: true,
           skipped: true,
           message,
-          noteText: draftOrder.note || null,
+          noteText: draftOrder.note2 || null,
           pricingPreview: [],
           settings: {
             employeeMarkupPercent: settings.employeeMarkupPercent,
@@ -334,7 +334,7 @@ export const loader = async ({ request }) => {
               id
               name
               reserveInventoryUntil
-              note
+              note2
               tags
             }
             userErrors {
