@@ -7,9 +7,19 @@ function roundMoney(value) {
 
 function formatDateForNote(notePrefix) {
   const now = new Date();
-  const month = now.getMonth() + 1;
-  const day = now.getDate();
-  const year = String(now.getFullYear()).slice(-2);
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Denver",
+    month: "numeric",
+    day: "numeric",
+    year: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(now);
+  const month = parts.find((p) => p.type === "month")?.value ?? "";
+  const day = parts.find((p) => p.type === "day")?.value ?? "";
+  const year = parts.find((p) => p.type === "year")?.value ?? "";
+
   return `${notePrefix} (${month}/${day}/${year})`;
 }
 
@@ -29,6 +39,27 @@ function hasEmployeePurchaseNote(note = "", notePrefix = "") {
   return String(note).trim().toLowerCase().startsWith(
     String(notePrefix).trim().toLowerCase(),
   );
+}
+
+function toMailingAddressInput(address) {
+  if (!address) return null;
+
+  const result = {};
+
+  if (address.firstName) result.firstName = address.firstName;
+  if (address.lastName) result.lastName = address.lastName;
+  if (address.company) result.company = address.company;
+  if (address.address1) result.address1 = address.address1;
+  if (address.address2) result.address2 = address.address2;
+  if (address.city) result.city = address.city;
+  if (address.provinceCode) result.provinceCode = address.provinceCode;
+  if (address.province) result.province = address.province;
+  if (address.countryCodeV2) result.countryCode = address.countryCodeV2;
+  if (address.country) result.country = address.country;
+  if (address.zip) result.zip = address.zip;
+  if (address.phone) result.phone = address.phone;
+
+  return Object.keys(result).length ? result : null;
 }
 
 async function writeAuditLog({
@@ -57,6 +88,42 @@ async function writeAuditLog({
   } catch (auditError) {
     console.error("Failed to write audit log:", auditError);
   }
+}
+
+async function getFirstLocalPickupHandle({ admin, shippingAddress, lineItems }) {
+  if (!shippingAddress) {
+    return null;
+  }
+
+  const deliveryResponse = await admin.graphql(
+    `#graphql
+      query DraftOrderPickupOptions($input: DraftOrderAvailableDeliveryOptionsInput!) {
+        draftOrderAvailableDeliveryOptions(input: $input) {
+          availableLocalPickupOptions {
+            handle
+            title
+            code
+            locationId
+            source
+          }
+        }
+      }
+    `,
+    {
+      variables: {
+        input: {
+          shippingAddress,
+          lineItems,
+        },
+      },
+    },
+  );
+
+  const deliveryJson = await deliveryResponse.json();
+  const pickupOptions =
+    deliveryJson.data?.draftOrderAvailableDeliveryOptions?.availableLocalPickupOptions ?? [];
+
+  return pickupOptions[0] ?? null;
 }
 
 export const loader = async ({ request }) => {
@@ -97,6 +164,34 @@ export const loader = async ({ request }) => {
             name
             note2
             tags
+            shippingAddress {
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              provinceCode
+              country
+              countryCodeV2
+              zip
+              phone
+            }
+            billingAddress {
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              provinceCode
+              country
+              countryCodeV2
+              zip
+              phone
+            }
             lineItems(first: 50) {
               nodes {
                 id
@@ -151,37 +246,7 @@ export const loader = async ({ request }) => {
 
     const alreadyTagged = hasEmployeePurchaseTag(draftOrder.tags);
     const alreadyNoted = hasEmployeePurchaseNote(draftOrder.note2, settings.notePrefix);
-
-    if (alreadyTagged || alreadyNoted) {
-      const message =
-        "Employee pricing was already applied to this draft order. No changes were made.";
-
-      await writeAuditLog({
-        shop,
-        draftOrderId,
-        actionStatus: "skipped",
-        message,
-        employeeMarkupPercent: settings.employeeMarkupPercent,
-        consignmentCostPercent: settings.consignmentCostPercent,
-        pricingApplied: false,
-      });
-
-      return cors(
-        Response.json({
-          ok: true,
-          skipped: true,
-          message,
-          noteText: draftOrder.note2 || null,
-          pricingPreview: [],
-          settings: {
-            employeeMarkupPercent: settings.employeeMarkupPercent,
-            consignmentCostPercent: settings.consignmentCostPercent,
-            reservationDays: settings.reservationDays,
-            invoiceSubject: settings.invoiceSubject,
-          },
-        }),
-      );
-    }
+    const isRecalculation = alreadyTagged || alreadyNoted;
 
     const updatedLineItems = [];
     const pricingPreview = [];
@@ -326,6 +391,48 @@ export const loader = async ({ request }) => {
       return cors(Response.json({ ok: false, error: message }, { status: 400 }));
     }
 
+    const shippingAddressInput = toMailingAddressInput(draftOrder.shippingAddress);
+    const billingAddressInput = toMailingAddressInput(draftOrder.billingAddress);
+
+    let pickupOption = null;
+    let pickupMessage = "";
+
+    try {
+      pickupOption = await getFirstLocalPickupHandle({
+        admin,
+        shippingAddress: shippingAddressInput,
+        lineItems: updatedLineItems,
+      });
+
+      if (!pickupOption) {
+        pickupMessage =
+          " Pricing was applied, but pickup in store was not auto-selected.";
+      }
+    } catch (pickupError) {
+      pickupMessage =
+        " Pricing was applied, but pickup in store could not be auto-selected.";
+    }
+
+    const updateInput = {
+      note: noteText,
+      reserveInventoryUntil,
+      lineItems: updatedLineItems,
+    };
+
+    if (shippingAddressInput) {
+      updateInput.shippingAddress = shippingAddressInput;
+    }
+
+    if (billingAddressInput) {
+      updateInput.billingAddress = billingAddressInput;
+    }
+
+    if (pickupOption?.handle) {
+      updateInput.shippingLine = {
+        shippingRateHandle: pickupOption.handle,
+      };
+    }
+
     const updateResponse = await admin.graphql(
       `#graphql
         mutation UpdateDraftOrder($id: ID!, $input: DraftOrderInput!) {
@@ -336,6 +443,10 @@ export const loader = async ({ request }) => {
               reserveInventoryUntil
               note2
               tags
+              shippingLine {
+                title
+                shippingRateHandle
+              }
             }
             userErrors {
               field
@@ -347,11 +458,7 @@ export const loader = async ({ request }) => {
       {
         variables: {
           id: draftOrderId,
-          input: {
-            note: noteText,
-            reserveInventoryUntil,
-            lineItems: updatedLineItems,
-          },
+          input: updateInput,
         },
       },
     );
@@ -374,12 +481,14 @@ export const loader = async ({ request }) => {
       return cors(Response.json({ ok: false, error: message }, { status: 400 }));
     }
 
-    const successMessage = "Employee pricing applied successfully.";
+    const successMessage = isRecalculation
+      ? `Employee pricing recalculated successfully.${pickupMessage}`
+      : `Employee pricing applied successfully.${pickupMessage}`;
 
     await writeAuditLog({
       shop,
       draftOrderId,
-      actionStatus: "applied",
+      actionStatus: isRecalculation ? "recalculated" : "applied",
       message: successMessage,
       employeeMarkupPercent: settings.employeeMarkupPercent,
       consignmentCostPercent: settings.consignmentCostPercent,
@@ -394,6 +503,8 @@ export const loader = async ({ request }) => {
         message: successMessage,
         noteText,
         reserveInventoryUntil,
+        pickupApplied: Boolean(pickupOption?.handle),
+        pickupTitle: pickupOption?.title || null,
         pricingPreview,
         settings: {
           employeeMarkupPercent: settings.employeeMarkupPercent,
